@@ -18,6 +18,7 @@ typedef enum {
     BleSpamAttackAppleNotYourDevice,
     BleSpamAttackFastPair,
     BleSpamAttackSwiftPair,
+    BleSpamAttackSwiftPairCustom,
     BleSpamAttackSamsungBuds,
     BleSpamAttackSamsungWatch,
     BleSpamAttackXiaomi,

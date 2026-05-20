@@ -6,6 +6,7 @@ static const char* attack_names[] = {
     [BleSpamAttackAppleNotYourDevice] = "Apple NotYourDevice",
     [BleSpamAttackFastPair] = "Google FastPair",
     [BleSpamAttackSwiftPair] = "MS SwiftPair",
+    [BleSpamAttackSwiftPairCustom] = "MS SwiftPair Custom",
     [BleSpamAttackSamsungBuds] = "Samsung Buds",
     [BleSpamAttackSamsungWatch] = "Samsung Watch",
     [BleSpamAttackXiaomi] = "Xiaomi QuickConnect",
@@ -36,7 +37,7 @@ bool ble_spam_scene_spam_menu_on_event(void* context, SceneManagerEvent event) {
     if(event.type == SceneManagerEventTypeCustom) {
         if(event.event < BleSpamAttackCount) {
             app->attack_type = event.event;
-            if(event.event == BleSpamAttackPairSpamCustom) {
+            if(event.event == BleSpamAttackPairSpamCustom || event.event == BleSpamAttackSwiftPairCustom) {
                 scene_manager_next_scene(app->scene_manager, BleSpamScenePairSpamCustom);
             } else {
                 scene_manager_next_scene(app->scene_manager, BleSpamSceneRunning);

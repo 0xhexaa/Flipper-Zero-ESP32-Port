@@ -14,6 +14,7 @@ static const char* attack_short_names[] = {
     [BleSpamAttackAppleNotYourDevice] = "Apple NYD",
     [BleSpamAttackFastPair] = "FastPair",
     [BleSpamAttackSwiftPair] = "SwiftPair",
+    [BleSpamAttackSwiftPairCustom] = "SwiftPair Custom",
     [BleSpamAttackSamsungBuds] = "Samsung Buds",
     [BleSpamAttackSamsungWatch] = "Samsung Watch",
     [BleSpamAttackXiaomi] = "Xiaomi",
@@ -72,6 +73,11 @@ static uint8_t build_next_payload(BleSpamApp* app, uint8_t* buf) {
             len = ble_spam_build_swiftpair_headphone(buf, swiftpair_headphone_names[hp_idx]);
         }
         app->current_index = idx + 1;
+        break;
+    }
+    case BleSpamAttackSwiftPairCustom: {
+        name = app->custom_pair_name[0] ? app->custom_pair_name : "SwiftPair Device";
+        len = ble_spam_build_swiftpair(buf, name);
         break;
     }
     case BleSpamAttackSamsungBuds: {

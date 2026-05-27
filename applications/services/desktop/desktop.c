@@ -50,7 +50,9 @@ static void desktop_lock_icon_draw_callback(Canvas* canvas, void* context) {
     canvas_draw_icon(canvas, 0, 0, &I_Lock_7x8);
 }
 
-static void desktop_dummy_mode_icon_draw_callback(Canvas* canvas, void* context) {
+// Dummy-/Game-Mode-Icon: im Port noch nicht verdrahtet (vgl. stm32/-Referenz) -> bewusst ungenutzt
+__attribute__((unused)) static void
+    desktop_dummy_mode_icon_draw_callback(Canvas* canvas, void* context) {
     UNUSED(context);
     furi_assert(canvas);
     canvas_draw_icon(canvas, 0, 0, &I_GameMode_11x8);
@@ -285,6 +287,7 @@ static Desktop* desktop_alloc(void) {
         desktop->view_dispatcher, desktop_back_event_callback);
 
     desktop->lock_menu = desktop_lock_menu_alloc();
+    desktop->usb_storage_view = desktop_usb_storage_alloc();
     desktop->debug_view = desktop_debug_alloc();
     desktop->popup = popup_alloc();
     desktop->locked_view = desktop_view_locked_alloc();
@@ -319,6 +322,10 @@ static Desktop* desktop_alloc(void) {
         desktop->view_dispatcher,
         DesktopViewIdLockMenu,
         desktop_lock_menu_get_view(desktop->lock_menu));
+    view_dispatcher_add_view(
+        desktop->view_dispatcher,
+        DesktopViewIdUsbStorage,
+        desktop_usb_storage_get_view(desktop->usb_storage_view));
     view_dispatcher_add_view(
         desktop->view_dispatcher, DesktopViewIdDebug, desktop_debug_get_view(desktop->debug_view));
     view_dispatcher_add_view(

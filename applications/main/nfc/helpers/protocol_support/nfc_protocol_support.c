@@ -1133,15 +1133,6 @@ static void nfc_protocol_support_emulate_build_view(NfcApp* instance) {
             widget, 90, 26, AlignCenter, AlignCenter, FontPrimary,
             "Emulating UID");
 
-        size_t uid_len;
-        const uint8_t* uid = nfc_device_get_uid(instance->nfc_device, &uid_len);
-
-        for(size_t i = 0; i < uid_len; ++i) {
-            furi_string_cat_printf(temp_str, "%02X ", uid[i]);
-        }
-
-        furi_string_trim(temp_str);
-
     } else {
         widget_add_string_element(
             widget, 90, 17, AlignCenter, AlignCenter, FontPrimary,

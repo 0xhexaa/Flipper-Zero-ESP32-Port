@@ -7,10 +7,10 @@
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
-# Single-app partition table for the 16 MB flash. See partitions_singleapp_16mb.csv.
+# Dual-OTA partition table for the 16 MB flash (self-update). See partitions_ota_16mb.csv.
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_singleapp_16mb.csv"
-CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_16mb.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota_16mb.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_ota_16mb.csv"
 
 # ESP32-S3 is dual-core Xtensa — keep unicore for Furi compatibility
 CONFIG_FREERTOS_UNICORE=y
@@ -33,6 +33,15 @@ CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
 # the NVS store removes that flash-write entirely; the PHY is (re)calibrated on
 # every boot instead (a few ms, no RF quality loss).
 # CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE is not set
+
+# Same class of bug as the PHY-cal store above: the WiFi NVS store issues
+# flash-writes at runtime that stall the shared flash/PSRAM MSPI cache. The SMB
+# browser runs long libsmb2 crypto (NTLMSSP) out of flash/PSRAM; a WiFi NVS
+# flash-write in that window panics it ("Cache disabled but cached memory region
+# accessed", crash in NTOWFv2). Disabling the WiFi NVS store removes the last
+# runtime flash-writer (app settings already go to SD via saved_struct). WiFi
+# still works; it just re-reads config each boot instead of caching it in NVS.
+# CONFIG_ESP_WIFI_NVS_ENABLED is not set
 
 # PSRAM: T-Embed CC1101 has 8MB PSRAM
 CONFIG_SPIRAM=y
@@ -74,7 +83,7 @@ CONFIG_TINYUSB_DEBUG_LEVEL=1
 
 # esp_http_server: increase header / URI limits for Evil Portal so smartphones
 # with large cookie sets don't trip the 431 "Request Header Fields Too Large" error.
-CONFIG_HTTPD_MAX_REQ_HDR_LEN=4096
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 CONFIG_HTTPD_MAX_URI_LEN=2048
 
 # Live-Credential-Dissektor parst im tcpip_thread → etwas mehr Stack-Reserve.
@@ -95,3 +104,8 @@ CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_IP_FORWARD=y
 CONFIG_LWIP_IPV4_NAPT=y
 CONFIG_LWIP_L2_TO_L3_COPY=y
+
+# Experiment: flash auto-suspend so the cache stays serviceable during flash
+# writes (would make PSRAM task stacks safe). Needs verified flash-chip support;
+# our chip is mfr 0x46 (no-name) so this is a test.
+CONFIG_SPI_FLASH_AUTO_SUSPEND=y

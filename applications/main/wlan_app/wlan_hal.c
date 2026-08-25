@@ -4,6 +4,7 @@
 #include <esp_private/wifi.h>
 #include <esp_netif.h>
 #include <esp_event.h>
+#include <esp_sntp.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -73,12 +74,33 @@ typedef struct {
     volatile bool* result;
 } WlanCmd;
 
+static bool s_sntp_started = false;
 static bool s_started = false;
 static bool s_bt_was_on = false;
 static bool s_netif_inited = false;
 static esp_netif_t* s_netif_sta = NULL;
 static volatile bool s_wifi_connected = false;
 static volatile bool s_wifi_auto_reconnect = false;
+static volatile bool s_auth_fail_latched = false;
+
+/** true für Disconnect-Reasons, die auf ein falsches Passwort / fehlgeschlagene
+ *  Authentifizierung hindeuten. Bewusst OHNE „AP nicht gefunden"/Beacon-Timeout,
+ *  damit ein korrektes gespeichertes Passwort bei einem bloßen Ausfall bleibt. */
+static bool wlan_reason_is_auth(uint8_t reason) {
+    switch(reason) {
+    case WIFI_REASON_AUTH_EXPIRE: // 2
+    case WIFI_REASON_MIC_FAILURE: // 14
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: // 15 – klassisch: falsches WPA2-Passwort
+    case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT: // 16
+    case WIFI_REASON_IE_IN_4WAY_DIFFERS: // 17
+    case WIFI_REASON_AUTH_FAIL: // 202
+    case WIFI_REASON_HANDSHAKE_TIMEOUT: // 204
+    case WIFI_REASON_CONNECTION_FAIL: // 205
+        return true;
+    default:
+        return false;
+    }
+}
 static bool s_event_handlers_registered = false;
 static volatile uint32_t s_own_ip = 0;
 static volatile uint32_t s_own_netmask = 0;
@@ -91,6 +113,11 @@ static StaticTask_t s_worker_buf;
 static void wlan_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     UNUSED(arg);
     if(event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t* d = (wifi_event_sta_disconnected_t*)event_data;
+        if(d) {
+            ESP_LOGW(TAG, "STA disconnected: reason=%u (ssid_len=%u)", (unsigned)d->reason, (unsigned)d->ssid_len);
+            if(wlan_reason_is_auth((uint8_t)d->reason)) s_auth_fail_latched = true;
+        }
         s_wifi_connected = false;
         s_own_ip = 0;
         s_own_netmask = 0;
@@ -102,6 +129,17 @@ static void wlan_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         s_own_ip = event->ip_info.ip.addr;
         s_own_netmask = event->ip_info.netmask.addr;
         s_wifi_connected = true;
+        // Sync the RTC via SNTP once we have an IP. Without a correct clock
+        // NTLMv2 (SMB) and anything else time-sensitive uses ~1970. UTC is
+        // fine for these uses. Harmless if the network has no internet (the
+        // SMB code also falls back to the server-supplied timestamp).
+        if(!s_sntp_started) {
+            esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+            esp_sntp_setservername(0, "pool.ntp.org");
+            esp_sntp_init();
+            s_sntp_started = true;
+            ESP_LOGI(TAG, "SNTP started (pool.ntp.org)");
+        }
     }
 }
 
@@ -173,6 +211,7 @@ static void wlan_worker_fn(void* arg) {
             s_wifi_connected = false;
             s_own_ip = 0;
             s_own_netmask = 0;
+            s_auth_fail_latched = false;
             vTaskDelay(pdMS_TO_TICKS(100));
 
             wifi_config_t wcfg = {0};
@@ -396,6 +435,10 @@ void wlan_hal_disconnect(void) {
 
 bool wlan_hal_is_connected(void) {
     return s_wifi_connected;
+}
+
+bool wlan_hal_last_fail_is_auth(void) {
+    return s_auth_fail_latched;
 }
 
 uint32_t wlan_hal_get_own_ip(void) {

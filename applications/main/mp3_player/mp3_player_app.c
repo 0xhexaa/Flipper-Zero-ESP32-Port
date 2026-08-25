@@ -1,6 +1,6 @@
 #include "mp3_player.h"
 #include "mp3_storage.h"
-#include "mp3_i2s.h"
+#include "mp3_sink.h"
 #include "mp3_decoder.h"
 
 #include <stdio.h>
@@ -148,8 +148,67 @@ static void render_now_playing(Canvas* canvas, Mp3App* app) {
     snprintf(vol, sizeof(vol), "Vol %u%%", (unsigned)app->volume);
     canvas_draw_str_aligned(canvas, 126, 50, AlignRight, AlignBottom, vol);
 
-    elements_button_left(canvas, "Back");
+    elements_button_left(canvas, "Config");
     elements_button_center(canvas, app->playback == Mp3StatePlaying ? "Pause" : "Play");
+}
+
+/* ---------- render: config (settings) ---------- */
+
+static void render_config(Canvas* canvas, Mp3App* app) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 10, "Settings");
+    canvas_draw_line(canvas, 0, 12, 127, 12);
+
+    canvas_set_font(canvas, FontSecondary);
+
+    bool airplay_on = airplay_ui_is_connected(app->airplay);
+    char volbuf[8];
+    snprintf(volbuf, sizeof(volbuf), "%u%%", (unsigned)app->volume);
+
+    const char* labels[6] = {"Audio Output", "Repeat", "Shuffle", "Volume", "Play MP3", "Exit"};
+    const char* values[6] = {
+        airplay_on ? "AirPlay" : "Speaker",
+        app->repeat ? "On" : "Off",
+        app->shuffle ? "On" : "Off",
+        volbuf,
+        NULL, /* Play MP3 — action row */
+        NULL, /* Exit — action row */
+    };
+
+    /* Scroll window so the cursor stays visible (5 rows fit under the title). */
+    const int total = 6;
+    const int visible = 5;
+    int top = app->config_sel - visible / 2;
+    if(top < 0) top = 0;
+    if(top > total - visible) top = total - visible;
+    if(top < 0) top = 0;
+
+    for(int idx = top; idx < top + visible && idx < total; idx++) {
+        int y = 13 + (idx - top) * 10;
+        bool sel = (app->config_sel == idx);
+        if(sel) {
+            canvas_draw_box(canvas, 0, y, 128, 10);
+            canvas_invert_color(canvas);
+        }
+        canvas_draw_str(canvas, 4, y + 8, labels[idx]);
+        if(values[idx]) {
+            char vb[16];
+            /* Volume (index 3) in edit mode: wrap in < > to show rotation adjusts it. */
+            if(idx == 3 && sel && app->config_editing) {
+                snprintf(vb, sizeof(vb), "<%s>", values[idx]);
+            } else {
+                snprintf(vb, sizeof(vb), "%s", values[idx]);
+            }
+            canvas_draw_str_aligned(canvas, 124, y + 8, AlignRight, AlignBottom, vb);
+        }
+        if(sel) canvas_invert_color(canvas);
+    }
+    /* simple scroll indicator: a down-arrow hint when more rows are below */
+    if(top + visible < total) {
+        canvas_draw_str_aligned(canvas, 123, 63, AlignRight, AlignBottom, "v");
+    }
+    /* No bottom action buttons — the settings list mirrors the SubGhz
+     * VariableItemList look (rotate = navigate, OK = select, Back = leave). */
 }
 
 static void mp3_render_callback(Canvas* canvas, void* ctx) {
@@ -157,8 +216,12 @@ static void mp3_render_callback(Canvas* canvas, void* ctx) {
     if(furi_mutex_acquire(app->mutex, 100) != FuriStatusOk) return;
 
     canvas_clear(canvas);
-    if(app->view == Mp3ViewBrowser) {
+    if(airplay_ui_is_active(app->airplay)) {
+        airplay_ui_render(canvas, app->airplay);
+    } else if(app->view == Mp3ViewBrowser) {
         render_browser(canvas, app);
+    } else if(app->view == Mp3ViewConfig) {
+        render_config(canvas, app);
     } else {
         render_now_playing(canvas, app);
     }
@@ -205,7 +268,23 @@ static void volume_step(Mp3App* app, int delta) {
     if(v < 0) v = 0;
     if(v > 100) v = 100;
     app->volume = (uint8_t)v;
-    mp3_i2s_set_volume(app->volume);
+    mp3_sink_set_volume(app->volume);
+}
+
+/* Index of the next track to play. With shuffle on, a random track (never the
+ * current one); otherwise the following track, or -1 at the end of the list. */
+static int32_t mp3_next_index(Mp3App* app) {
+    int32_t count = (int32_t)app->playlist.count;
+    if(count <= 0) return -1;
+    if(app->shuffle && count > 1) {
+        int32_t n;
+        do {
+            n = (int32_t)(furi_hal_random_get() % (uint32_t)count);
+        } while(n == app->playing_index);
+        return n;
+    }
+    int32_t n = app->playing_index + 1;
+    return (n < count) ? n : -1;
 }
 
 /* ---------- input handling ---------- */
@@ -229,7 +308,10 @@ static bool handle_browser_input(Mp3App* app, const InputEvent* in) {
         if(app->playlist.count > 0) start_track(app, app->selected);
         break;
     case InputKeyBack:
-        return false;  /* exit app */
+        /* Back from the list returns to the Config (the app's root screen). */
+        app->config_sel = 0;
+        app->view = Mp3ViewConfig;
+        break;
     default:
         break;
     }
@@ -239,37 +321,110 @@ static bool handle_browser_input(Mp3App* app, const InputEvent* in) {
 static bool handle_now_playing_input(Mp3App* app, const InputEvent* in) {
     if(in->type != InputTypeShort && in->type != InputTypeRepeat) {
         if(in->key == InputKeyBack && in->type == InputTypeLong) {
-            /* Long-back from Now-Playing: stop and exit. */
-            stop_track(app);
-            return false;
+            /* Long-back from Now-Playing: back to the playlist (keep playing). */
+            app->view = Mp3ViewBrowser;
+            return true;
         }
         return true;
     }
 
     switch(in->key) {
     case InputKeyUp:
-        volume_step(app, +5);
+        /* rotate left (CCW) → open the Config (settings) menu */
+        app->config_sel = 0;
+        app->config_editing = false;
+        app->view = Mp3ViewConfig;
         break;
-    case InputKeyDown:
-        volume_step(app, -5);
+    case InputKeyDown: {
+        /* rotate right (CW) → next track (shuffle-aware) */
+        int32_t n = mp3_next_index(app);
+        if(n >= 0) start_track(app, n);
         break;
+    }
     case InputKeyLeft:
-        /* Encoder + rotate left → previous track. */
-        if(app->playing_index > 0) {
-            start_track(app, app->playing_index - 1);
-        }
+        /* encoder held + rotate left → previous track */
+        if(app->playing_index > 0) start_track(app, app->playing_index - 1);
         break;
-    case InputKeyRight:
-        if(app->playing_index + 1 < (int32_t)app->playlist.count) {
-            start_track(app, app->playing_index + 1);
-        }
+    case InputKeyRight: {
+        /* encoder held + rotate right → next track */
+        int32_t n = mp3_next_index(app);
+        if(n >= 0) start_track(app, n);
         break;
+    }
     case InputKeyOk:
-        toggle_pause(app);
+        if(app->playback == Mp3StateIdle && app->playing_index >= 0) {
+            /* Track finished → OK replays it from the start. */
+            start_track(app, app->playing_index);
+        } else {
+            toggle_pause(app);
+        }
         break;
     case InputKeyBack:
-        /* Short-back: return to browser, keep playback going. */
+        /* Back → return to the playlist, keep playback going. */
         app->view = Mp3ViewBrowser;
+        break;
+    default:
+        break;
+    }
+    return true;
+}
+
+#define MP3_CONFIG_ITEMS 5 /* Audio Output, Shuffle, Volume, Repeat, Play MP3 */
+
+static bool handle_config_input(Mp3App* app, const InputEvent* in) {
+    if(in->type != InputTypeShort && in->type != InputTypeRepeat) return true;
+
+    /* Volume edit mode: rotation adjusts the value; OK/Back/Left exits. */
+    if(app->config_editing) {
+        switch(in->key) {
+        case InputKeyUp:
+            volume_step(app, +5);
+            break;
+        case InputKeyDown:
+            volume_step(app, -5);
+            break;
+        case InputKeyOk:
+        case InputKeyBack:
+        case InputKeyLeft:
+            app->config_editing = false;
+            break;
+        default:
+            break;
+        }
+        return true;
+    }
+
+    switch(in->key) {
+    case InputKeyUp:
+        app->config_sel = (app->config_sel - 1 + MP3_CONFIG_ITEMS) % MP3_CONFIG_ITEMS;
+        break;
+    case InputKeyDown:
+        app->config_sel = (app->config_sel + 1) % MP3_CONFIG_ITEMS;
+        break;
+    case InputKeyOk:
+        if(app->config_sel == 0) {
+            /* Audio Output → Speaker/AirPlay select screen (airplay UI takes over) */
+            airplay_ui_enter(app->airplay);
+        } else if(app->config_sel == 1) {
+            app->repeat = !app->repeat;
+        } else if(app->config_sel == 2) {
+            app->shuffle = !app->shuffle;
+        } else if(app->config_sel == 3) {
+            app->config_editing = true; /* enter volume edit */
+        } else if(app->config_sel == 4) {
+            app->view = Mp3ViewBrowser; /* Play MP3 → track list */
+        } else {
+            return false; /* Exit → leave the app */
+        }
+        break;
+    case InputKeyBack:
+        /* Config is the root screen: go to Now-Playing if a track is loaded,
+         * otherwise leave the app. */
+        if(app->playback != Mp3StateIdle && app->playing_index >= 0) {
+            app->view = Mp3ViewNowPlaying;
+        } else {
+            return false; /* exit app */
+        }
         break;
     default:
         break;
@@ -286,13 +441,18 @@ int32_t mp3_player_app(void* p) {
     Mp3App* app = malloc(sizeof(Mp3App));
     app->mutex       = furi_mutex_alloc(FuriMutexTypeNormal);
     app->event_queue = furi_message_queue_alloc(16, sizeof(Mp3Event));
-    app->view        = Mp3ViewBrowser;
+    app->view        = Mp3ViewConfig; /* app opens on the config/settings screen */
     app->selected    = 0;
     app->playback    = Mp3StateIdle;
     app->playing_index = -1;
     app->volume      = 80;
     app->elapsed_ms  = 0;
     app->duration_ms = 0;
+    app->shuffle     = false;
+    app->repeat      = false;
+    app->config_sel  = 0;
+    app->config_editing = false;
+    app->airplay     = airplay_ui_alloc();
 
     if(!mp3_storage_playlist_alloc(&app->playlist)) {
         FURI_LOG_E(TAG, "playlist alloc failed");
@@ -303,12 +463,12 @@ int32_t mp3_player_app(void* p) {
      * registers a channel even when nobody is playing tones. We need exclusive
      * ownership of I2S_NUM_0 for our own writer thread. Restored on exit. */
     furi_hal_speaker_deinit();
-    if(!mp3_i2s_init(44100)) {
+    if(!mp3_sink_init_speaker(44100)) {
         FURI_LOG_E(TAG, "i2s init failed");
         furi_hal_speaker_init();   /* restore on failure */
         goto cleanup_playlist;
     }
-    mp3_i2s_set_volume(app->volume);
+    mp3_sink_set_volume(app->volume);
 
     if(!mp3_decoder_init()) {
         FURI_LOG_E(TAG, "decoder init failed");
@@ -342,26 +502,55 @@ int32_t mp3_player_app(void* p) {
 
         switch(ev.type) {
         case Mp3EventTypeKey:
-            if(app->view == Mp3ViewBrowser) {
+            if(airplay_ui_is_active(app->airplay)) {
+                airplay_ui_input(app->airplay, &ev.input);
+            } else if(app->view == Mp3ViewBrowser) {
                 running = handle_browser_input(app, &ev.input);
+            } else if(app->view == Mp3ViewConfig) {
+                running = handle_config_input(app, &ev.input);
             } else {
                 running = handle_now_playing_input(app, &ev.input);
             }
             break;
-        case Mp3EventTypeTick:
-            mp3_decoder_get_progress(&app->elapsed_ms, &app->duration_ms);
+        case Mp3EventTypeTick: {
+            airplay_ui_tick(app->airplay);
+            /* Don't refresh progress once a track has finished (Idle) — that
+             * would pull elapsed back to the track duration and undo the 0:00
+             * reset done in TrackEnded. */
+            if(mp3_decoder_is_playing() || mp3_decoder_is_paused()) {
+                mp3_decoder_get_progress(&app->elapsed_ms, &app->duration_ms);
+            }
             if(mp3_decoder_is_paused())       app->playback = Mp3StatePaused;
             else if(mp3_decoder_is_playing()) app->playback = Mp3StatePlaying;
+
+            /* Push title + position to the AirPlay receiver ~once per second. */
+            static uint8_t prog_div = 0;
+            if(mp3_sink_is_airplay() && app->playback != Mp3StateIdle &&
+               app->playing_index >= 0 && ++prog_div >= 4) {
+                prog_div = 0;
+                char title[MP3_PLAYER_NAME_MAX];
+                track_display_name(
+                    &app->playlist.tracks[app->playing_index], title, sizeof(title));
+                mp3_sink_set_metadata(title, app->duration_ms);
+                mp3_sink_set_progress(app->elapsed_ms, app->duration_ms);
+            }
             break;
+        }
         case Mp3EventTypeTrackEnded:
             FURI_LOG_I(TAG, "track ended");
-            /* Auto-advance to next track if there is one, else stay on
-             * Now-Playing with state=Idle so the user sees that playback
-             * finished. Side-button takes them back. */
-            if(app->playing_index + 1 < (int32_t)app->playlist.count) {
-                start_track(app, app->playing_index + 1);
+            if(app->repeat && app->playing_index >= 0) {
+                /* Repeat: loop the current track forever. */
+                start_track(app, app->playing_index);
             } else {
-                app->playback = Mp3StateIdle;
+                int32_t n = mp3_next_index(app);
+                if(n >= 0) {
+                    start_track(app, n);
+                } else {
+                    /* End of the list, no repeat → reset to 0:00 and show the
+                     * Play button so the user can replay manually. */
+                    app->playback = Mp3StateIdle;
+                    app->elapsed_ms = 0;
+                }
             }
             break;
         }
@@ -380,8 +569,9 @@ int32_t mp3_player_app(void* p) {
 
     mp3_decoder_stop();
     mp3_decoder_deinit();
-    mp3_i2s_deinit();
+    mp3_sink_deinit();
     furi_hal_speaker_init();   /* restore standard speaker HAL */
+    airplay_ui_free(app->airplay);   /* stops WiFi + restores BT if started */
     mp3_storage_playlist_free(&app->playlist);
     furi_message_queue_free(app->event_queue);
     furi_mutex_free(app->mutex);
@@ -390,7 +580,7 @@ int32_t mp3_player_app(void* p) {
     return 0;
 
 cleanup_i2s:
-    mp3_i2s_deinit();
+    mp3_sink_deinit();
     furi_hal_speaker_init();
 cleanup_playlist:
     mp3_storage_playlist_free(&app->playlist);

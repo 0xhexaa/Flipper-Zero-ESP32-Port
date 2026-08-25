@@ -10,8 +10,9 @@ enum MainIndex {
     MainIndexChannelDeauth = 11,
     MainIndexChannelSniffer = 12,
     MainIndexChannelSsidSpam = 13,
-    MainIndexChannelEvilPortal = 14,
-    MainIndexUpdateSd = 15,
+    MainIndexChannelSmartDeauth = 14,
+    MainIndexChannelEvilPortal = 15,
+    MainIndexWebFs = 17,
 };
 
 static void wlan_app_scene_main_submenu_cb(void* context, uint32_t index) {
@@ -27,7 +28,8 @@ void wlan_app_scene_main_on_enter(void* context) {
     // Channel-Aktionen sind immer sichtbar; Verbindungs-Aktionen sind state-abhängig.
     app->channel_mode_active = false;
     // Hub-Scene: ein evtl. abgebrochener Update-SD-Flow wird hier zurückgesetzt.
-    app->update_sd_flow = false;
+    app->webfs_flow = false;
+    app->fw_update_flow = false;
 
     if(!app->connected && !app->target_selected) {
         submenu_add_item_centered(
@@ -65,10 +67,13 @@ void wlan_app_scene_main_on_enter(void* context) {
         app->submenu, "SSID Spam", MainIndexChannelSsidSpam,
         wlan_app_scene_main_submenu_cb, app);
     submenu_add_item(
+        app->submenu, "Smart Deauth", MainIndexChannelSmartDeauth,
+        wlan_app_scene_main_submenu_cb, app);
+    submenu_add_item(
         app->submenu, "Evil Portal", MainIndexChannelEvilPortal,
         wlan_app_scene_main_submenu_cb, app);
     submenu_add_item(
-        app->submenu, "Update SD", MainIndexUpdateSd,
+        app->submenu, "Web-Filesystem", MainIndexWebFs,
         wlan_app_scene_main_submenu_cb, app);
 
     view_dispatcher_switch_to_view(app->view_dispatcher, WlanAppViewSubmenu);
@@ -132,18 +137,23 @@ bool wlan_app_scene_main_on_event(void* context, SceneManagerEvent event) {
             scene_manager_next_scene(app->scene_manager, WlanAppSceneSsidSpam);
             consumed = true;
             break;
+        case MainIndexChannelSmartDeauth:
+            scene_manager_next_scene(app->scene_manager, WlanAppSceneSmartDeauth);
+            consumed = true;
+            break;
         case MainIndexChannelEvilPortal:
             scene_manager_next_scene(app->scene_manager, WlanAppSceneEvilPortalMenu);
             consumed = true;
             break;
-        case MainIndexUpdateSd:
-            app->update_sd_flow = true;
+        case MainIndexWebFs:
+            // Already connected → straight to the info scene (serve over STA);
+            // otherwise show the Select Wifi / Dedicated AP menu.
             if(app->connected) {
-                // Bereits verbunden → direkt zur Bestätigung.
-                scene_manager_next_scene(app->scene_manager, WlanAppSceneUpdateSd);
+                scene_manager_set_scene_state(
+                    app->scene_manager, WlanAppSceneWebFsInfo, 0 /* STA */);
+                scene_manager_next_scene(app->scene_manager, WlanAppSceneWebFsInfo);
             } else {
-                // Kein WLAN → gleicher Connect-Flow wie "Select Wifi".
-                scene_manager_next_scene(app->scene_manager, WlanAppSceneConnect);
+                scene_manager_next_scene(app->scene_manager, WlanAppSceneWebFsMenu);
             }
             consumed = true;
             break;

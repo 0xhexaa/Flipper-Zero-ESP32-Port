@@ -104,6 +104,14 @@ static WlanApp* wlan_app_alloc(void) {
     view_set_context(app->view_sd_update, app->view_dispatcher);
     view_dispatcher_add_view(app->view_dispatcher, WlanAppViewSdUpdate, app->view_sd_update);
 
+    app->view_fw_update = wlan_fw_update_view_alloc();
+    view_set_context(app->view_fw_update, app->view_dispatcher);
+    view_dispatcher_add_view(app->view_dispatcher, WlanAppViewFwUpdate, app->view_fw_update);
+
+    app->view_androidtv_remote = wlan_androidtv_remote_view_alloc();
+    view_dispatcher_add_view(
+        app->view_dispatcher, WlanAppViewAndroidTvRemote, app->view_androidtv_remote);
+
 
     app->ap_records = malloc(sizeof(WlanApRecord) * WLAN_APP_MAX_APS);
     app->ap_count = 0;
@@ -136,8 +144,28 @@ static WlanApp* wlan_app_alloc(void) {
     app->attack_block_internet = false;
     app->attack_throttle = WlanAppThrottleOff;
 
-    app->update_sd_flow = false;
     app->sd_update = wlan_sd_update_alloc();
+    app->fw_update = wlan_fw_update_alloc();
+    // FW-Marker /ext/.fw_version auf die laufende Version (FURI_ESP32_VERSION)
+    // ziehen — schreibt nur, wenn er fehlt oder abweicht.
+    wlan_fw_update_sync_marker();
+
+    // SMB Browser: lazily allocated on first use (allocates PSRAM buffers +
+    // a worker task), freed in wlan_app_free.
+    app->smb = NULL;
+    app->smb_server_ip[0] = '\0';
+    app->smb_server_name[0] = '\0';
+    app->smb_user[0] = '\0';
+    app->smb_pass[0] = '\0';
+    app->smb_share[0] = '\0';
+    app->smb_path[0] = '\0';
+
+    // Android TV remote: lazily allocated on first use (allocates PSRAM buffers
+    // + a worker task with an internal-DRAM stack), freed in wlan_app_free.
+    app->androidtv = NULL;
+    app->androidtv_ip[0] = '\0';
+    app->androidtv_name[0] = '\0';
+    app->androidtv_pin[0] = '\0';
 
     app->text_buf = furi_string_alloc();
     app->netcut = wlan_netcut_alloc();
@@ -179,6 +207,18 @@ static void wlan_app_free(WlanApp* app) {
         wlan_sd_update_free(app->sd_update);
         app->sd_update = NULL;
     }
+    if(app->fw_update) {
+        wlan_fw_update_free(app->fw_update);
+        app->fw_update = NULL;
+    }
+    if(app->smb) {
+        wlan_smb_free(app->smb);
+        app->smb = NULL;
+    }
+    if(app->androidtv) {
+        wlan_androidtv_free(app->androidtv);
+        app->androidtv = NULL;
+    }
     wlan_hal_stop();
 
     view_dispatcher_remove_view(app->view_dispatcher, WlanAppViewSubmenu);
@@ -198,6 +238,8 @@ static void wlan_app_free(WlanApp* app) {
     view_dispatcher_remove_view(app->view_dispatcher, WlanAppViewEvilPortalCaptured);
     view_dispatcher_remove_view(app->view_dispatcher, WlanAppViewLiveCreds);
     view_dispatcher_remove_view(app->view_dispatcher, WlanAppViewSdUpdate);
+    view_dispatcher_remove_view(app->view_dispatcher, WlanAppViewFwUpdate);
+    view_dispatcher_remove_view(app->view_dispatcher, WlanAppViewAndroidTvRemote);
 
     submenu_free(app->submenu);
     widget_free(app->widget);
@@ -216,6 +258,8 @@ static void wlan_app_free(WlanApp* app) {
     wlan_evil_portal_captured_view_free(app->evil_portal_captured_view_obj);
     wlan_live_creds_view_free(app->live_creds_view_obj);
     wlan_sd_update_view_free(app->view_sd_update);
+    wlan_fw_update_view_free(app->view_fw_update);
+    wlan_androidtv_remote_view_free(app->view_androidtv_remote);
 
     scene_manager_free(app->scene_manager);
     view_dispatcher_free(app->view_dispatcher);
@@ -230,9 +274,33 @@ static void wlan_app_free(WlanApp* app) {
 }
 
 int32_t wlan_app(void* args) {
-    UNUSED(args);
     WlanApp* app = wlan_app_alloc();
-    scene_manager_next_scene(app->scene_manager, WlanAppSceneMain);
+
+    // Launch arg "webfs" (e.g. from the desktop lock menu) opens the
+    // Web-Filesystem flow directly: info scene if already connected, else the
+    // Select Wifi / Dedicated AP menu.
+    const char* arg = args;
+    if(arg && strcmp(arg, "webfs") == 0) {
+        if(wlan_hal_is_connected()) {
+            scene_manager_set_scene_state(app->scene_manager, WlanAppSceneWebFsInfo, 0 /* STA */);
+            scene_manager_next_scene(app->scene_manager, WlanAppSceneWebFsInfo);
+        } else {
+            scene_manager_next_scene(app->scene_manager, WlanAppSceneWebFsMenu);
+        }
+    } else if(arg && strcmp(arg, "update") == 0) {
+        // "Update Firmware" aus dem Settings-Menü: kombiniertes Update (FW + SD)
+        // direkt öffnen. Bereits verbunden → direkt zur Update-Scene, sonst erst
+        // Connect-Flow (fw_update_flow routet nach Erfolg zur Update-Scene).
+        app->fw_update_flow = true;
+        if(wlan_hal_is_connected()) {
+            scene_manager_next_scene(app->scene_manager, WlanAppSceneFwUpdate);
+        } else {
+            scene_manager_next_scene(app->scene_manager, WlanAppSceneConnect);
+        }
+    } else {
+        scene_manager_next_scene(app->scene_manager, WlanAppSceneMain);
+    }
+
     view_dispatcher_run(app->view_dispatcher);
     wlan_app_free(app);
     return 0;

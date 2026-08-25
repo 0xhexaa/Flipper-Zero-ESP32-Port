@@ -123,10 +123,14 @@ bool wlan_app_scene_ssid_connect_on_event(void* context, SceneManagerEvent event
             app->connected = true;
             app->target_selected = false;
             app->lan_scan_complete = false;
-            if(app->update_sd_flow) {
-                // Update-SD-Flow braucht keinen ARP-Scan → direkt zur
-                // Bestätigung/Download-Scene.
-                scene_manager_next_scene(app->scene_manager, WlanAppSceneUpdateSd);
+            if(app->webfs_flow) {
+                // Web-Filesystem over STA: serve on the fresh connection.
+                scene_manager_set_scene_state(
+                    app->scene_manager, WlanAppSceneWebFsInfo, 0 /* STA */);
+                scene_manager_next_scene(app->scene_manager, WlanAppSceneWebFsInfo);
+            } else if(app->fw_update_flow) {
+                // Kombiniertes Update (FW + SD) → direkt zur Update-Scene.
+                scene_manager_next_scene(app->scene_manager, WlanAppSceneFwUpdate);
             } else {
                 // gw_mac aus DHCP-Antwort sollte jetzt in der ARP-Tabelle stehen.
                 wlan_netcut_preflight(app->netcut);
@@ -135,8 +139,15 @@ bool wlan_app_scene_ssid_connect_on_event(void* context, SceneManagerEvent event
             }
             consumed = true;
         } else if(event.event == WlanAppCustomEventConnectFailed) {
-            // Bei Failed: gespeichertes Passwort verwerfen damit der User es erneut eingibt.
-            app->target_ap.has_password = false;
+
+            if(!app->target_ap.is_open && wlan_hal_last_fail_is_auth()) {
+                wlan_password_delete(app->target_ap.ssid);
+                app->target_ap.has_password = false;
+
+                if(app->ap_selected_index < app->ap_count) {
+                    app->ap_records[app->ap_selected_index].has_password = false;
+                }
+            }
             scene_manager_previous_scene(app->scene_manager);
             consumed = true;
         }

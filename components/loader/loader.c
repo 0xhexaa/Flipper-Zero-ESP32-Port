@@ -123,6 +123,15 @@ void loader_show_menu(Loader* loader) {
     furi_message_queue_put(loader->queue, &message, FuriWaitForever);
 }
 
+void loader_show_settings(Loader* loader) {
+    furi_check(loader);
+
+    LoaderMessage message;
+    message.type = LoaderMessageTypeShowSettings;
+
+    furi_message_queue_put(loader->queue, &message, FuriWaitForever);
+}
+
 FuriPubSub* loader_get_pubsub(Loader* loader) {
     furi_check(loader);
     return loader->pubsub;
@@ -361,6 +370,13 @@ static void loader_do_menu_show(Loader* loader) {
     }
 }
 
+static void loader_do_settings_show(Loader* loader) {
+    if(!loader->loader_menu) {
+        loader->loader_menu = loader_menu_alloc_settings_first(
+            loader_menu_closed_callback, loader);
+    }
+}
+
 static void loader_do_menu_closed(Loader* loader) {
     if(loader->loader_menu) {
         loader_menu_free(loader->loader_menu);
@@ -483,10 +499,21 @@ static void loader_do_app_closed(Loader* loader) {
     event.type = LoaderEventTypeApplicationStopped;
     furi_pubsub_publish(loader->pubsub, &event);
 
-    // Emit queue empty since we don't have a deferred launch queue
-    LoaderEvent empty_event;
-    empty_event.type = LoaderEventTypeNoMoreAppsInQueue;
-    furi_pubsub_publish(loader->pubsub, &empty_event);
+    if(loader->pending_name) {
+        LoaderMessage relaunch;
+        memset(&relaunch, 0, sizeof(relaunch));
+        relaunch.type = LoaderMessageTypeStartByNameDetachedWithGuiError;
+        relaunch.start.name = loader->pending_name;
+        relaunch.start.args = loader->pending_args;
+        loader->pending_name = NULL;
+        loader->pending_args = NULL;
+        furi_message_queue_put(loader->queue, &relaunch, FuriWaitForever);
+    } else {
+        // Emit queue empty since we don't have a deferred launch queue
+        LoaderEvent empty_event;
+        empty_event.type = LoaderEventTypeNoMoreAppsInQueue;
+        furi_pubsub_publish(loader->pubsub, &empty_event);
+    }
 }
 
 // app
@@ -514,6 +541,17 @@ int32_t loader_srv(void* p) {
                 break;
             }
             case LoaderMessageTypeStartByNameDetachedWithGuiError: {
+                if(loader_do_is_locked(loader)) {
+                    free(loader->pending_name);
+                    free(loader->pending_args);
+                    loader->pending_name = (char*)message.start.name;
+                    loader->pending_args = (char*)message.start.args;
+                    FURI_LOG_I(
+                        TAG,
+                        "Deferred launch queued: %s",
+                        loader->pending_name ? loader->pending_name : "(null)");
+                    break;
+                }
                 FuriString* error_message = furi_string_alloc();
                 LoaderMessageLoaderStatusResult status = loader_do_start_by_name(
                     loader,
@@ -533,6 +571,9 @@ int32_t loader_srv(void* p) {
             }
             case LoaderMessageTypeShowMenu:
                 loader_do_menu_show(loader);
+                break;
+            case LoaderMessageTypeShowSettings:
+                loader_do_settings_show(loader);
                 break;
             case LoaderMessageTypeMenuClosed:
                 loader_do_menu_closed(loader);
